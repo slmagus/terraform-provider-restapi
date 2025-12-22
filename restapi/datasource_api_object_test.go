@@ -10,11 +10,11 @@ import (
 
 func TestAccRestApiDataSource_Basic(t *testing.T) {
 	debug := false
-	apiServerObjects := make(map[string]map[string]interface{})
+	apiServerObjects := make(map[string]map[string]any)
 
 	// Pre-populate fakeserver with an object to search for
-	apiServerObjects["/api/objects"] = map[string]interface{}{
-		"1234": map[string]interface{}{
+	apiServerObjects["/api/objects"] = map[string]any{
+		"1234": map[string]any{
 			"id":    "1234",
 			"first": "Foo",
 			"last":  "Bar",
