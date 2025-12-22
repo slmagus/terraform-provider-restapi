@@ -1,313 +1,361 @@
 package restapi
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"net/url"
+	"os"
 
-	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
+	"github.com/hashicorp/terraform-plugin-framework/datasource"
+	"github.com/hashicorp/terraform-plugin-framework/path"
+	"github.com/hashicorp/terraform-plugin-framework/provider"
+	"github.com/hashicorp/terraform-plugin-framework/provider/schema"
+	"github.com/hashicorp/terraform-plugin-framework/resource"
+	"github.com/hashicorp/terraform-plugin-framework/types"
 )
 
-/*Provider implements the REST API provider*/
-func Provider() *schema.Provider {
-	return &schema.Provider{
-		Schema: map[string]*schema.Schema{
-			"uri": {
-				Type:        schema.TypeString,
-				Required:    true,
-				DefaultFunc: schema.EnvDefaultFunc("REST_API_URI", nil),
-				Description: "URI of the REST API endpoint. This serves as the base of all requests.",
+// Ensure RestAPIProvider satisfies various provider interfaces.
+var _ provider.Provider = &RestAPIProvider{}
+
+// RestAPIProvider defines the provider implementation.
+type RestAPIProvider struct {
+	// version is set to the provider version on release, "dev" when the
+	// provider is built and ran locally, and "test" when running acceptance
+	// testing.
+	version string
+}
+
+// New is a helper function to simplify provider server and testing implementation.
+func New(version string) func() provider.Provider {
+	return func() provider.Provider {
+		return &RestAPIProvider{
+			version: version,
+		}
+	}
+}
+
+func (p *RestAPIProvider) Metadata(ctx context.Context, req provider.MetadataRequest, resp *provider.MetadataResponse) {
+	resp.TypeName = "restapi"
+	resp.Version = p.version
+}
+
+func (p *RestAPIProvider) Schema(ctx context.Context, req provider.SchemaRequest, resp *provider.SchemaResponse) {
+	resp.Schema = schema.Schema{
+		MarkdownDescription: "A provider for managing REST API resources.",
+		Attributes: map[string]schema.Attribute{
+			"uri": schema.StringAttribute{
+				MarkdownDescription: "URI of the REST API endpoint. This serves as the base of all requests.",
+				Required:            true,
 			},
-			"insecure": {
-				Type:        schema.TypeBool,
-				Optional:    true,
-				DefaultFunc: schema.EnvDefaultFunc("REST_API_INSECURE", nil),
-				Description: "When using https, this disables TLS verification of the host.",
+			"insecure": schema.BoolAttribute{
+				MarkdownDescription: "When using https, this disables TLS verification of the host.",
+				Optional:            true,
 			},
-			"username": {
-				Type:        schema.TypeString,
-				Optional:    true,
-				DefaultFunc: schema.EnvDefaultFunc("REST_API_USERNAME", nil),
-				Description: "When set, will use this username for BASIC auth to the API.",
+			"username": schema.StringAttribute{
+				MarkdownDescription: "When set, will use this username for BASIC auth to the API.",
+				Optional:            true,
 			},
-			"password": {
-				Type:        schema.TypeString,
-				Optional:    true,
-				DefaultFunc: schema.EnvDefaultFunc("REST_API_PASSWORD", nil),
-				Description: "When set, will use this password for BASIC auth to the API.",
+			"password": schema.StringAttribute{
+				MarkdownDescription: "When set, will use this password for BASIC auth to the API.",
+				Optional:            true,
+				Sensitive:           true,
 			},
-			"headers": {
-				Type:        schema.TypeMap,
-				Elem:        schema.TypeString,
-				Optional:    true,
-				Description: "A map of header names and values to set on all outbound requests. This is useful if you want to use a script via the 'external' provider or provide a pre-approved token or change Content-Type from `application/json`. If `username` and `password` are set and Authorization is one of the headers defined here, the BASIC auth credentials take precedence.",
+			"headers": schema.MapAttribute{
+				MarkdownDescription: "A map of header names and values to set on all outbound requests.",
+				Optional:            true,
+				ElementType:         types.StringType,
 			},
-			"use_cookies": {
-				Type:        schema.TypeBool,
-				Optional:    true,
-				DefaultFunc: schema.EnvDefaultFunc("REST_API_USE_COOKIES", nil),
-				Description: "Enable cookie jar to persist session.",
+			"use_cookies": schema.BoolAttribute{
+				MarkdownDescription: "Enable cookie jar to persist session.",
+				Optional:            true,
 			},
-			"timeout": {
-				Type:        schema.TypeInt,
-				Optional:    true,
-				DefaultFunc: schema.EnvDefaultFunc("REST_API_TIMEOUT", 0),
-				Description: "When set, will cause requests taking longer than this time (in seconds) to be aborted.",
+			"timeout": schema.Int64Attribute{
+				MarkdownDescription: "When set, will cause requests taking longer than this time (in seconds) to be aborted.",
+				Optional:            true,
 			},
-			"id_attribute": {
-				Type:        schema.TypeString,
-				Optional:    true,
-				DefaultFunc: schema.EnvDefaultFunc("REST_API_ID_ATTRIBUTE", nil),
-				Description: "When set, this key will be used to operate on REST objects. For example, if the ID is set to 'name', changes to the API object will be to http://foo.com/bar/VALUE_OF_NAME. This value may also be a '/'-delimeted path to the id attribute if it is multple levels deep in the data (such as `attributes/id` in the case of an object `{ \"attributes\": { \"id\": 1234 }, \"config\": { \"name\": \"foo\", \"something\": \"bar\"}}`",
+			"id_attribute": schema.StringAttribute{
+				MarkdownDescription: "When set, this key will be used to operate on REST objects.",
+				Optional:            true,
 			},
-			"create_method": {
-				Type:        schema.TypeString,
-				DefaultFunc: schema.EnvDefaultFunc("REST_API_CREATE_METHOD", nil),
-				Description: "Defaults to `POST`. The HTTP method used to CREATE objects of this type on the API server.",
-				Optional:    true,
+			"create_method": schema.StringAttribute{
+				MarkdownDescription: "Defaults to `POST`. The HTTP method used to CREATE objects of this type on the API server.",
+				Optional:            true,
 			},
-			"read_method": {
-				Type:        schema.TypeString,
-				DefaultFunc: schema.EnvDefaultFunc("REST_API_READ_METHOD", nil),
-				Description: "Defaults to `GET`. The HTTP method used to READ objects of this type on the API server.",
-				Optional:    true,
+			"read_method": schema.StringAttribute{
+				MarkdownDescription: "Defaults to `GET`. The HTTP method used to READ objects of this type on the API server.",
+				Optional:            true,
 			},
-			"update_method": {
-				Type:        schema.TypeString,
-				DefaultFunc: schema.EnvDefaultFunc("REST_API_UPDATE_METHOD", nil),
-				Description: "Defaults to `PUT`. The HTTP method used to UPDATE objects of this type on the API server.",
-				Optional:    true,
+			"update_method": schema.StringAttribute{
+				MarkdownDescription: "Defaults to `PUT`. The HTTP method used to UPDATE objects of this type on the API server.",
+				Optional:            true,
 			},
-			"destroy_method": {
-				Type:        schema.TypeString,
-				DefaultFunc: schema.EnvDefaultFunc("REST_API_DESTROY_METHOD", nil),
-				Description: "Defaults to `DELETE`. The HTTP method used to DELETE objects of this type on the API server.",
-				Optional:    true,
+			"destroy_method": schema.StringAttribute{
+				MarkdownDescription: "Defaults to `DELETE`. The HTTP method used to DELETE objects of this type on the API server.",
+				Optional:            true,
 			},
-			"copy_keys": {
-				Type: schema.TypeList,
-				Elem: &schema.Schema{
-					Type: schema.TypeString,
-				},
-				Optional:    true,
-				Description: "When set, any PUT to the API for an object will copy these keys from the data the provider has gathered about the object. This is useful if internal API information must also be provided with updates, such as the revision of the object.",
+			"copy_keys": schema.ListAttribute{
+				MarkdownDescription: "When set, any PUT to the API for an object will copy these keys from the data the provider has gathered about the object.",
+				Optional:            true,
+				ElementType:         types.StringType,
 			},
-			"write_returns_object": {
-				Type:        schema.TypeBool,
-				Optional:    true,
-				DefaultFunc: schema.EnvDefaultFunc("REST_API_WRO", nil),
-				Description: "Set this when the API returns the object created on all write operations (POST, PUT). This is used by the provider to refresh internal data structures.",
+			"write_returns_object": schema.BoolAttribute{
+				MarkdownDescription: "Set this when the API returns the object created on all write operations (POST, PUT).",
+				Optional:            true,
 			},
-			"create_returns_object": {
-				Type:        schema.TypeBool,
-				Optional:    true,
-				DefaultFunc: schema.EnvDefaultFunc("REST_API_CRO", nil),
-				Description: "Set this when the API returns the object created only on creation operations (POST). This is used by the provider to refresh internal data structures.",
+			"create_returns_object": schema.BoolAttribute{
+				MarkdownDescription: "Set this when the API returns the object created only on creation operations (POST).",
+				Optional:            true,
 			},
-			"xssi_prefix": {
-				Type:        schema.TypeString,
-				Optional:    true,
-				DefaultFunc: schema.EnvDefaultFunc("REST_API_XSSI_PREFIX", nil),
-				Description: "Trim the xssi prefix from response string, if present, before parsing.",
+			"xssi_prefix": schema.StringAttribute{
+				MarkdownDescription: "Trim the xssi prefix from response string, if present, before parsing.",
+				Optional:            true,
 			},
-			"rate_limit": {
-				Type:        schema.TypeFloat,
-				Optional:    true,
-				DefaultFunc: schema.EnvDefaultFunc("REST_API_RATE_LIMIT", math.MaxFloat64),
-				Description: "Set this to limit the number of requests per second made to the API.",
+			"rate_limit": schema.Float64Attribute{
+				MarkdownDescription: "Set this to limit the number of requests per second made to the API.",
+				Optional:            true,
 			},
-			"test_path": {
-				Type:        schema.TypeString,
-				Optional:    true,
-				DefaultFunc: schema.EnvDefaultFunc("REST_API_TEST_PATH", nil),
-				Description: "If set, the provider will issue a read_method request to this path after instantiation requiring a 200 OK response before proceeding. This is useful if your API provides a no-op endpoint that can signal if this provider is configured correctly. Response data will be ignored.",
+			"test_path": schema.StringAttribute{
+				MarkdownDescription: "If set, the provider will issue a read_method request to this path after instantiation requiring a 200 OK response before proceeding.",
+				Optional:            true,
 			},
-			"debug": {
-				Type:        schema.TypeBool,
-				Optional:    true,
-				DefaultFunc: schema.EnvDefaultFunc("REST_API_DEBUG", nil),
-				Description: "Enabling this will cause lots of debug information to be printed to STDOUT by the API client.",
+			"debug": schema.BoolAttribute{
+				MarkdownDescription: "Enabling this will cause lots of debug information to be printed to STDOUT by the API client.",
+				Optional:            true,
 			},
-			"oauth_client_credentials": {
-				Type:        schema.TypeList,
-				Optional:    true,
-				MaxItems:    1,
-				Description: "Configuration for oauth client credential flow using the https://pkg.go.dev/golang.org/x/oauth2 implementation",
-				Elem: &schema.Resource{
-					Schema: map[string]*schema.Schema{
-						"oauth_client_id": {
-							Type:        schema.TypeString,
-							Description: "client id",
-							Required:    true,
+			"cert_string": schema.StringAttribute{
+				MarkdownDescription: "When set with the key_string parameter, the provider will load a client certificate as a string for mTLS authentication.",
+				Optional:            true,
+			},
+			"key_string": schema.StringAttribute{
+				MarkdownDescription: "When set with the cert_string parameter, the provider will load a client certificate as a string for mTLS authentication.",
+				Optional:            true,
+				Sensitive:           true,
+			},
+			"cert_file": schema.StringAttribute{
+				MarkdownDescription: "When set with the key_file parameter, the provider will load a client certificate as a file for mTLS authentication.",
+				Optional:            true,
+			},
+			"key_file": schema.StringAttribute{
+				MarkdownDescription: "When set with the cert_file parameter, the provider will load a client certificate as a file for mTLS authentication.",
+				Optional:            true,
+			},
+			"root_ca_file": schema.StringAttribute{
+				MarkdownDescription: "When set, the provider will load a root CA certificate as a file for mTLS authentication.",
+				Optional:            true,
+			},
+			"root_ca_string": schema.StringAttribute{
+				MarkdownDescription: "When set, the provider will load a root CA certificate as a string for mTLS authentication.",
+				Optional:            true,
+			},
+		},
+		Blocks: map[string]schema.Block{
+			"oauth_client_credentials": schema.ListNestedBlock{
+				MarkdownDescription: "Configuration for oauth client credential flow.",
+				NestedObject: schema.NestedBlockObject{
+					Attributes: map[string]schema.Attribute{
+						"oauth_client_id": schema.StringAttribute{
+							MarkdownDescription: "OAuth client ID.",
+							Required:            true,
 						},
-						"oauth_client_secret": {
-							Type:        schema.TypeString,
-							Description: "client secret",
-							Required:    true,
+						"oauth_client_secret": schema.StringAttribute{
+							MarkdownDescription: "OAuth client secret.",
+							Required:            true,
+							Sensitive:           true,
 						},
-						"oauth_token_endpoint": {
-							Type:        schema.TypeString,
-							Description: "oauth token endpoint",
-							Required:    true,
+						"oauth_token_endpoint": schema.StringAttribute{
+							MarkdownDescription: "OAuth token endpoint URL.",
+							Required:            true,
 						},
-						"oauth_scopes": {
-							Type:        schema.TypeList,
-							Elem:        &schema.Schema{Type: schema.TypeString},
-							Optional:    true,
-							Description: "scopes",
+						"oauth_scopes": schema.ListAttribute{
+							MarkdownDescription: "OAuth scopes to request.",
+							Optional:            true,
+							ElementType:         types.StringType,
 						},
-						"endpoint_params": {
-							Type:        schema.TypeMap,
-							Optional:    true,
-							Description: "Additional key/values to pass to the underlying Oauth client library (as EndpointParams)",
-							Elem: &schema.Schema{
-								Type: schema.TypeString,
-							},
+						"endpoint_params": schema.MapAttribute{
+							MarkdownDescription: "Additional key/values to pass to the underlying OAuth client library.",
+							Optional:            true,
+							ElementType:         types.StringType,
 						},
 					},
 				},
 			},
-			"cert_string": {
-				Type:        schema.TypeString,
-				Optional:    true,
-				DefaultFunc: schema.EnvDefaultFunc("REST_API_CERT_STRING", nil),
-				Description: "When set with the key_string parameter, the provider will load a client certificate as a string for mTLS authentication.",
-			},
-			"key_string": {
-				Type:        schema.TypeString,
-				Optional:    true,
-				DefaultFunc: schema.EnvDefaultFunc("REST_API_KEY_STRING", nil),
-				Description: "When set with the cert_string parameter, the provider will load a client certificate as a string for mTLS authentication. Note that this mechanism simply delegates to golang's tls.LoadX509KeyPair which does not support passphrase protected private keys. The most robust security protections available to the key_file are simple file system permissions.",
-			},
-			"cert_file": {
-				Type:        schema.TypeString,
-				Optional:    true,
-				DefaultFunc: schema.EnvDefaultFunc("REST_API_CERT_FILE", nil),
-				Description: "When set with the key_file parameter, the provider will load a client certificate as a file for mTLS authentication.",
-			},
-			"key_file": {
-				Type:        schema.TypeString,
-				Optional:    true,
-				DefaultFunc: schema.EnvDefaultFunc("REST_API_KEY_FILE", nil),
-				Description: "When set with the cert_file parameter, the provider will load a client certificate as a file for mTLS authentication. Note that this mechanism simply delegates to golang's tls.LoadX509KeyPair which does not support passphrase protected private keys. The most robust security protections available to the key_file are simple file system permissions.",
-			},
-			"root_ca_file": {
-				Type:        schema.TypeString,
-				Optional:    true,
-				DefaultFunc: schema.EnvDefaultFunc("REST_API_ROOT_CA_FILE", nil),
-				Description: "When set, the provider will load a root CA certificate as a file for mTLS authentication. This is useful when the API server is using a self-signed certificate and the client needs to trust it.",
-			},
-			"root_ca_string": {
-				Type:        schema.TypeString,
-				Optional:    true,
-				DefaultFunc: schema.EnvDefaultFunc("REST_API_ROOT_CA_STRING", nil),
-				Description: "When set, the provider will load a root CA certificate as a string for mTLS authentication. This is useful when the API server is using a self-signed certificate and the client needs to trust it.",
-			},
 		},
-		ResourcesMap: map[string]*schema.Resource{
-			/* Could only get terraform to recognize this resource if
-			         the name began with the provider's name and had at least
-				 one underscore. This is not documented anywhere I could find */
-			"restapi_object": resourceRestAPI(),
-		},
-		DataSourcesMap: map[string]*schema.Resource{
-			"restapi_object": dataSourceRestAPI(),
-		},
-		ConfigureFunc: configureProvider,
 	}
 }
 
-func configureProvider(d *schema.ResourceData) (interface{}, error) {
+func (p *RestAPIProvider) Configure(ctx context.Context, req provider.ConfigureRequest, resp *provider.ConfigureResponse) {
+	var config RestAPIProviderModel
 
-	/* As "data-safe" as terraform says it is, you'd think
-	   it would have already coaxed this to a slice FOR me */
+	resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
+
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	// Handle environment variable defaults
+	uri := config.URI.ValueString()
+	if uri == "" {
+		uri = os.Getenv("REST_API_URI")
+	}
+	if uri == "" {
+		resp.Diagnostics.AddAttributeError(
+			path.Root("uri"),
+			"Missing REST API URI",
+			"The provider cannot create the REST API client as there is a missing or empty value for the REST API URI. "+
+				"Set the uri value in the configuration or use the REST_API_URI environment variable.",
+		)
+		return
+	}
+
+	// Build copy_keys slice
 	copyKeys := make([]string, 0)
-	if iCopyKeys := d.Get("copy_keys"); iCopyKeys != nil {
-		for _, v := range iCopyKeys.([]interface{}) {
-			copyKeys = append(copyKeys, v.(string))
+	if !config.CopyKeys.IsNull() && !config.CopyKeys.IsUnknown() {
+		var copyKeysList []types.String
+		config.CopyKeys.ElementsAs(ctx, &copyKeysList, false)
+		for _, v := range copyKeysList {
+			copyKeys = append(copyKeys, v.ValueString())
 		}
 	}
 
+	// Build headers map
 	headers := make(map[string]string)
-	if iHeaders := d.Get("headers"); iHeaders != nil {
-		for k, v := range iHeaders.(map[string]interface{}) {
-			headers[k] = v.(string)
+	if !config.Headers.IsNull() && !config.Headers.IsUnknown() {
+		var headersMap map[string]types.String
+		config.Headers.ElementsAs(ctx, &headersMap, false)
+		for k, v := range headersMap {
+			headers[k] = v.ValueString()
 		}
+	}
+
+	// Set rate limit default
+	rateLimit := math.MaxFloat64
+	if !config.RateLimit.IsNull() && !config.RateLimit.IsUnknown() {
+		rateLimit = config.RateLimit.ValueFloat64()
 	}
 
 	opt := &apiClientOpt{
-		uri:                 d.Get("uri").(string),
-		insecure:            d.Get("insecure").(bool),
-		username:            d.Get("username").(string),
-		password:            d.Get("password").(string),
+		uri:                 uri,
+		insecure:            config.Insecure.ValueBool(),
+		username:            config.Username.ValueString(),
+		password:            config.Password.ValueString(),
 		headers:             headers,
-		useCookies:          d.Get("use_cookies").(bool),
-		timeout:             d.Get("timeout").(int),
-		idAttribute:         d.Get("id_attribute").(string),
+		useCookies:          config.UseCookies.ValueBool(),
+		timeout:             int(config.Timeout.ValueInt64()),
+		idAttribute:         config.IDAttribute.ValueString(),
 		copyKeys:            copyKeys,
-		writeReturnsObject:  d.Get("write_returns_object").(bool),
-		createReturnsObject: d.Get("create_returns_object").(bool),
-		xssiPrefix:          d.Get("xssi_prefix").(string),
-		rateLimit:           d.Get("rate_limit").(float64),
-		debug:               d.Get("debug").(bool),
+		writeReturnsObject:  config.WriteReturnsObject.ValueBool(),
+		createReturnsObject: config.CreateReturnsObject.ValueBool(),
+		xssiPrefix:          config.XSSIPrefix.ValueString(),
+		rateLimit:           rateLimit,
+		debug:               config.Debug.ValueBool(),
 	}
 
-	if v, ok := d.GetOk("create_method"); ok {
-		opt.createMethod = v.(string)
+	// Handle optional HTTP methods
+	if !config.CreateMethod.IsNull() && !config.CreateMethod.IsUnknown() {
+		opt.createMethod = config.CreateMethod.ValueString()
 	}
-	if v, ok := d.GetOk("read_method"); ok {
-		opt.readMethod = v.(string)
+	if !config.ReadMethod.IsNull() && !config.ReadMethod.IsUnknown() {
+		opt.readMethod = config.ReadMethod.ValueString()
 	}
-	if v, ok := d.GetOk("update_method"); ok {
-		opt.updateMethod = v.(string)
+	if !config.UpdateMethod.IsNull() && !config.UpdateMethod.IsUnknown() {
+		opt.updateMethod = config.UpdateMethod.ValueString()
 	}
-	if v, ok := d.GetOk("destroy_method"); ok {
-		opt.destroyMethod = v.(string)
+	if !config.DestroyMethod.IsNull() && !config.DestroyMethod.IsUnknown() {
+		opt.destroyMethod = config.DestroyMethod.ValueString()
 	}
-	if v, ok := d.GetOk("oauth_client_credentials"); ok {
-		oauthConfig := v.([]interface{})[0].(map[string]interface{})
 
-		opt.oauthClientID = oauthConfig["oauth_client_id"].(string)
-		opt.oauthClientSecret = oauthConfig["oauth_client_secret"].(string)
-		opt.oauthTokenURL = oauthConfig["oauth_token_endpoint"].(string)
-		opt.oauthScopes = expandStringSet(oauthConfig["oauth_scopes"].([]interface{}))
+	// Handle OAuth configuration
+	if !config.OAuthClientCredentials.IsNull() && !config.OAuthClientCredentials.IsUnknown() {
+		var oauthConfigs []OAuthClientCredentialsModel
+		config.OAuthClientCredentials.ElementsAs(ctx, &oauthConfigs, false)
+		if len(oauthConfigs) > 0 {
+			oauthConfig := oauthConfigs[0]
+			opt.oauthClientID = oauthConfig.OAuthClientID.ValueString()
+			opt.oauthClientSecret = oauthConfig.OAuthClientSecret.ValueString()
+			opt.oauthTokenURL = oauthConfig.OAuthTokenEndpoint.ValueString()
 
-		if tmp, ok := oauthConfig["endpoint_params"]; ok {
-			m := tmp.(map[string]interface{})
-			setVals := url.Values{}
-			for k, val := range m {
-				setVals.Add(k, val.(string))
+			if !oauthConfig.OAuthScopes.IsNull() && !oauthConfig.OAuthScopes.IsUnknown() {
+				var scopes []types.String
+				oauthConfig.OAuthScopes.ElementsAs(ctx, &scopes, false)
+				oauthScopesStr := make([]string, len(scopes))
+				for i, s := range scopes {
+					oauthScopesStr[i] = s.ValueString()
+				}
+				opt.oauthScopes = oauthScopesStr
 			}
-			opt.oauthEndpointParams = setVals
+
+			if !oauthConfig.EndpointParams.IsNull() && !oauthConfig.EndpointParams.IsUnknown() {
+				var paramsMap map[string]types.String
+				oauthConfig.EndpointParams.ElementsAs(ctx, &paramsMap, false)
+				setVals := url.Values{}
+				for k, val := range paramsMap {
+					setVals.Add(k, val.ValueString())
+				}
+				opt.oauthEndpointParams = setVals
+			}
 		}
 	}
-	if v, ok := d.GetOk("cert_file"); ok {
-		opt.certFile = v.(string)
-	}
-	if v, ok := d.GetOk("key_file"); ok {
-		opt.keyFile = v.(string)
-	}
-	if v, ok := d.GetOk("cert_string"); ok {
-		opt.certString = v.(string)
-	}
-	if v, ok := d.GetOk("key_string"); ok {
-		opt.keyString = v.(string)
-	}
-	if v, ok := d.GetOk("root_ca_file"); ok {
-		opt.rootCAFile = v.(string)
-	}
-	if v, ok := d.GetOk("root_ca_string"); ok {
-		opt.rootCAString = v.(string)
 
+	// Handle TLS configuration
+	if !config.CertFile.IsNull() && !config.CertFile.IsUnknown() {
+		opt.certFile = config.CertFile.ValueString()
 	}
+	if !config.KeyFile.IsNull() && !config.KeyFile.IsUnknown() {
+		opt.keyFile = config.KeyFile.ValueString()
+	}
+	if !config.CertString.IsNull() && !config.CertString.IsUnknown() {
+		opt.certString = config.CertString.ValueString()
+	}
+	if !config.KeyString.IsNull() && !config.KeyString.IsUnknown() {
+		opt.keyString = config.KeyString.ValueString()
+	}
+	if !config.RootCAFile.IsNull() && !config.RootCAFile.IsUnknown() {
+		opt.rootCAFile = config.RootCAFile.ValueString()
+	}
+	if !config.RootCAString.IsNull() && !config.RootCAString.IsUnknown() {
+		opt.rootCAString = config.RootCAString.ValueString()
+	}
+
 	client, err := NewAPIClient(opt)
+	if err != nil {
+		resp.Diagnostics.AddError(
+			"Unable to Create REST API Client",
+			"An unexpected error occurred when creating the REST API client. "+
+				"If the error is not clear, please contact the provider developers.\n\n"+
+				"Error: "+err.Error(),
+		)
+		return
+	}
 
-	if v, ok := d.GetOk("test_path"); ok {
-		testPath := v.(string)
+	// Test path validation
+	if !config.TestPath.IsNull() && !config.TestPath.IsUnknown() {
+		testPath := config.TestPath.ValueString()
 		_, err := client.sendRequest(client.readMethod, testPath, "")
 		if err != nil {
-			return client, fmt.Errorf("a test request to %v after setting up the provider did not return an OK response - is your configuration correct? %v", testPath, err)
+			resp.Diagnostics.AddError(
+				"REST API Test Path Failed",
+				fmt.Sprintf("A test request to %v after setting up the provider did not return an OK response. "+
+					"Is your configuration correct?\n\nError: %v", testPath, err),
+			)
+			return
 		}
 	}
-	return client, err
+
+	// Make the API client available during DataSource and Resource
+	// type Configure methods.
+	resp.DataSourceData = client
+	resp.ResourceData = client
+}
+
+func (p *RestAPIProvider) Resources(ctx context.Context) []func() resource.Resource {
+	return []func() resource.Resource{
+		NewRestAPIObjectResource,
+	}
+}
+
+func (p *RestAPIProvider) DataSources(ctx context.Context) []func() datasource.DataSource {
+	return []func() datasource.DataSource{
+		NewRestAPIObjectDataSource,
+	}
 }

@@ -6,19 +6,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
-
-	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
 )
-
-// After any operation that returns API data, we'll stuff all the k,v pairs into the api_data map so users can consume the values elsewhere if they'd like
-func setResourceState(obj *APIObject, d *schema.ResourceData) {
-	apiData := make(map[string]string)
-	for k, v := range obj.apiData {
-		apiData[k] = fmt.Sprintf("%v", v)
-	}
-	d.Set("api_data", apiData)
-	d.Set("api_response", obj.apiResponse)
-}
 
 // GetStringAtKey uses GetObjectAtKey to verify the resulting object is either a JSON string or Number and returns it as a string
 func GetStringAtKey(data map[string]interface{}, path string, debug bool) (string, error) {
@@ -144,19 +132,4 @@ func GetEnvOrDefault(k string, defaultvalue string) string {
 		return defaultvalue
 	}
 	return v
-}
-
-func expandStringSet(configured []interface{}) []string {
-	return expandStringList(configured)
-}
-
-func expandStringList(configured []interface{}) []string {
-	vs := make([]string, 0, len(configured))
-	for _, v := range configured {
-		val, ok := v.(string)
-		if ok && val != "" {
-			vs = append(vs, v.(string))
-		}
-	}
-	return vs
 }

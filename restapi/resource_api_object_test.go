@@ -7,10 +7,6 @@ package restapi
   https://github.com/terraform-providers/terraform-provider-aws/blob/master/aws/resource_aws_db_security_group_test.go
 */
 
-/*
-  "log"
-  "github.com/hashicorp/terraform/config"
-*/
 import (
 	"encoding/json"
 	"fmt"
@@ -20,7 +16,7 @@ import (
 	"testing"
 
 	"github.com/Mastercard/terraform-provider-restapi/fakeserver"
-	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/resource"
+	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
 )
 
 // example.Widget represents a concrete Go type that represents an API resource
@@ -50,8 +46,8 @@ func TestAccRestApiObject_Basic(t *testing.T) {
 	}
 
 	resource.UnitTest(t, resource.TestCase{
-		Providers: testAccProviders,
-		PreCheck:  func() { svr.StartInBackground() },
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		PreCheck:                 func() { svr.StartInBackground() },
 		Steps: []resource.TestStep{
 			{
 				Config: generateTestResource(
@@ -127,6 +123,10 @@ func generateTestResource(name string, data string, params map[string]interface{
 	}
 
 	return fmt.Sprintf(`
+provider "restapi" {
+  uri = "http://127.0.0.1:8082/"
+}
+
 resource "restapi_object" "%s" {
 %s
 }
@@ -170,7 +170,7 @@ func TestAccRestApiObject_FailedUpdate(t *testing.T) {
 	os.Setenv("REST_API_URI", "http://"+host)
 
 	resource.UnitTest(t, resource.TestCase{
-		Providers: testAccProviders,
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{
 			{
 				// Create the resource
@@ -182,7 +182,7 @@ func TestAccRestApiObject_FailedUpdate(t *testing.T) {
 				Check: resource.TestCheckResourceAttr("restapi_object.Foo", "data", `{ "id": "1234", "foo": "Bar" }`),
 			},
 			{
-				// Try update. It will fail becuase we return 400 for PUT operations from mock server
+				// Try update. It will fail because we return 400 for PUT operations from mock server
 				Config: generateTestResource(
 					"Foo",
 					`{ "id": "1234", "foo": "Updated" }`,

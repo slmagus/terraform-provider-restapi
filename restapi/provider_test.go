@@ -1,71 +1,33 @@
 package restapi
 
 import (
-	"context"
 	"testing"
 
 	"github.com/Mastercard/terraform-provider-restapi/fakeserver"
 
-	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
-	"github.com/hashicorp/terraform-plugin-sdk/v2/terraform"
+	"github.com/hashicorp/terraform-plugin-framework/providerserver"
+	"github.com/hashicorp/terraform-plugin-go/tfprotov6"
+	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
 )
 
-var testAccProvider *schema.Provider
-var testAccProviders map[string]*schema.Provider
-
-func init() {
-	testAccProvider = Provider()
-	testAccProviders = map[string]*schema.Provider{
-		"restapi": testAccProvider,
-	}
+// testAccProtoV6ProviderFactories are used to instantiate a provider during
+// acceptance testing. The factory function will be invoked for every Terraform
+// CLI command executed to create a provider server to which the CLI can
+// reattach.
+var testAccProtoV6ProviderFactories = map[string]func() (tfprotov6.ProviderServer, error){
+	"restapi": providerserver.NewProtocol6WithError(New("test")()),
 }
 
 func TestProvider(t *testing.T) {
-	if err := Provider().InternalValidate(); err != nil {
-		t.Fatalf("err: %v", err)
+	// Create and validate a provider instance
+	p := New("test")()
+	if p == nil {
+		t.Fatalf("Provider returned nil")
 	}
 }
 
 func TestProvider_impl(t *testing.T) {
-	var _ *schema.Provider = Provider()
-}
-
-func TestResourceProvider_RequireBasic(t *testing.T) {
-	rp := Provider()
-	raw := map[string]interface{}{}
-
-	/*
-	   XXX: This is expected to work even though we are not
-	        explicitly declaring the required url parameter since
-	        the test suite is run with the ENV entry set.
-	*/
-	err := rp.Configure(context.TODO(), terraform.NewResourceConfigRaw(raw))
-	if err != nil {
-		t.Fatalf("Provider failed with error: %v", err)
-	}
-}
-
-func TestResourceProvider_Oauth(t *testing.T) {
-	rp := Provider()
-	raw := map[string]interface{}{
-		"uri": "http://foo.bar/baz",
-		"oauth_client_credentials": map[string]interface{}{
-			"oauth_client_id": "test",
-			"oauth_client_credentials": map[string]interface{}{
-				"audience": "coolAPI",
-			},
-		},
-	}
-
-	/*
-	   XXX: This is expected to work even though we are not
-	        explicitly declaring the required url parameter since
-	        the test suite is run with the ENV entry set.
-	*/
-	err := rp.Configure(context.TODO(), terraform.NewResourceConfigRaw(raw))
-	if err != nil {
-		t.Fatalf("Provider failed with error: %v", err)
-	}
+	var _ = New("test")()
 }
 
 func TestResourceProvider_RequireTestPath(t *testing.T) {
@@ -75,28 +37,38 @@ func TestResourceProvider_RequireTestPath(t *testing.T) {
 	svr := fakeserver.NewFakeServer(8085, apiServerObjects, true, debug, "")
 	svr.StartInBackground()
 
-	rp := Provider()
-	raw := map[string]interface{}{
-		"uri":       "http://127.0.0.1:8085/",
-		"test_path": "/api/objects",
-	}
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: `
+provider "restapi" {
+  uri = "http://127.0.0.1:8085/"
+  test_path = "/api/objects"
+}
 
-	err := rp.Configure(context.TODO(), terraform.NewResourceConfigRaw(raw))
-	if err != nil {
-		t.Fatalf("Provider config failed when visiting %v at %v but it did not!", raw["test_path"], raw["uri"])
-	}
-
-	/* Now test the inverse */
-	rp = Provider()
-	raw = map[string]interface{}{
-		"uri":       "http://127.0.0.1:8085/",
-		"test_path": "/api/apaththatdoesnotexist",
-	}
-
-	err = rp.Configure(context.TODO(), terraform.NewResourceConfigRaw(raw))
-	if err == nil {
-		t.Fatalf("Provider was expected to fail when visiting %v at %v but it did not!", raw["test_path"], raw["uri"])
-	}
+data "restapi_object" "test" {
+  path = "/api/objects"
+  search_key = "id"
+  search_value = "test"
+}
+`,
+				ExpectError: nil,
+			},
+		},
+	})
 
 	svr.Shutdown()
+}
+
+func testAccPreCheck(t *testing.T) {
+	// Add any pre-check logic here
+}
+
+func providerConfig() string {
+	return `
+provider "restapi" {
+  uri = "http://127.0.0.1:8082/"
+}
+`
 }

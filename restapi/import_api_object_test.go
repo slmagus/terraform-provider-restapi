@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	"github.com/Mastercard/terraform-provider-restapi/fakeserver"
-	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/resource"
+	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
 )
 
 func TestAccRestApiObject_importBasic(t *testing.T) {
@@ -35,8 +35,8 @@ func TestAccRestApiObject_importBasic(t *testing.T) {
 	client.sendRequest("POST", "/api/objects", `{ "id": "1234", "first": "Foo", "last": "Bar" }`)
 
 	resource.UnitTest(t, resource.TestCase{
-		Providers: testAccProviders,
-		PreCheck:  func() { svr.StartInBackground() },
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		PreCheck:                 func() { svr.StartInBackground() },
 		Steps: []resource.TestStep{
 			{
 				Config: generateTestResource(

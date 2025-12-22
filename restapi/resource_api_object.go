@@ -1,228 +1,382 @@
 package restapi
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
-	"runtime"
 	"strconv"
 	"strings"
 
-	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
+	"github.com/hashicorp/terraform-plugin-framework/attr"
+	fwpath "github.com/hashicorp/terraform-plugin-framework/path"
+	"github.com/hashicorp/terraform-plugin-framework/resource"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/booldefault"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/types"
 )
 
-func resourceRestAPI() *schema.Resource {
-	// Consider data sensitive if env variables is set to true.
+// Ensure provider defined types fully satisfy framework interfaces.
+var _ resource.Resource = &RestAPIObjectResource{}
+var _ resource.ResourceWithImportState = &RestAPIObjectResource{}
+var _ resource.ResourceWithConfigure = &RestAPIObjectResource{}
+
+// NewRestAPIObjectResource is a helper function to simplify the provider implementation.
+func NewRestAPIObjectResource() resource.Resource {
+	return &RestAPIObjectResource{}
+}
+
+// RestAPIObjectResource defines the resource implementation.
+type RestAPIObjectResource struct {
+	client *APIClient
+}
+
+func (r *RestAPIObjectResource) Metadata(ctx context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
+	resp.TypeName = req.ProviderTypeName + "_object"
+}
+
+func (r *RestAPIObjectResource) Schema(ctx context.Context, req resource.SchemaRequest, resp *resource.SchemaResponse) {
+	// Consider data sensitive if env variable is set to true.
 	isDataSensitive, _ := strconv.ParseBool(GetEnvOrDefault("API_DATA_IS_SENSITIVE", "false"))
 
-	return &schema.Resource{
-		Create: resourceRestAPICreate,
-		Read:   resourceRestAPIRead,
-		Update: resourceRestAPIUpdate,
-		Delete: resourceRestAPIDelete,
-		Exists: resourceRestAPIExists,
-
-		Description: "Acting as a wrapper of cURL, this object supports POST, GET, PUT and DELETE on the specified url",
-
-		Importer: &schema.ResourceImporter{
-			State: resourceRestAPIImport,
+	resp.Schema = schema.Schema{
+		MarkdownDescription: "Acting as a wrapper of cURL, this object supports POST, GET, PUT and DELETE on the specified url",
+		Attributes: map[string]schema.Attribute{
+			"id": schema.StringAttribute{
+				MarkdownDescription: "The ID of this resource.",
+				Computed:            true,
+				PlanModifiers: []planmodifier.String{
+					stringplanmodifier.UseStateForUnknown(),
+				},
+			},
+			"path": schema.StringAttribute{
+				MarkdownDescription: "The API path on top of the base URL set in the provider that represents objects of this type on the API server.",
+				Required:            true,
+			},
+			"create_path": schema.StringAttribute{
+				MarkdownDescription: "Defaults to `path`. The API path that represents where to CREATE (POST) objects of this type on the API server. The string `{id}` will be replaced with the terraform ID of the object if the data contains the `id_attribute`.",
+				Optional:            true,
+			},
+			"read_path": schema.StringAttribute{
+				MarkdownDescription: "Defaults to `path/{id}`. The API path that represents where to READ (GET) objects of this type on the API server. The string `{id}` will be replaced with the terraform ID of the object.",
+				Optional:            true,
+			},
+			"update_path": schema.StringAttribute{
+				MarkdownDescription: "Defaults to `path/{id}`. The API path that represents where to UPDATE (PUT) objects of this type on the API server. The string `{id}` will be replaced with the terraform ID of the object.",
+				Optional:            true,
+			},
+			"destroy_path": schema.StringAttribute{
+				MarkdownDescription: "Defaults to `path/{id}`. The API path that represents where to DESTROY (DELETE) objects of this type on the API server. The string `{id}` will be replaced with the terraform ID of the object.",
+				Optional:            true,
+			},
+			"create_method": schema.StringAttribute{
+				MarkdownDescription: "Defaults to `create_method` set on the provider. Allows per-resource override of `create_method`.",
+				Optional:            true,
+			},
+			"read_method": schema.StringAttribute{
+				MarkdownDescription: "Defaults to `read_method` set on the provider. Allows per-resource override of `read_method`.",
+				Optional:            true,
+			},
+			"update_method": schema.StringAttribute{
+				MarkdownDescription: "Defaults to `update_method` set on the provider. Allows per-resource override of `update_method`.",
+				Optional:            true,
+			},
+			"destroy_method": schema.StringAttribute{
+				MarkdownDescription: "Defaults to `destroy_method` set on the provider. Allows per-resource override of `destroy_method`.",
+				Optional:            true,
+			},
+			"id_attribute": schema.StringAttribute{
+				MarkdownDescription: "Defaults to `id_attribute` set on the provider. Allows per-resource override of `id_attribute`.",
+				Optional:            true,
+			},
+			"object_id": schema.StringAttribute{
+				MarkdownDescription: "Defaults to the id learned by the provider during normal operations and `id_attribute`. Allows you to set the id manually.",
+				Optional:            true,
+			},
+			"data": schema.StringAttribute{
+				MarkdownDescription: "Valid JSON object that this provider will manage with the API server.",
+				Required:            true,
+				Sensitive:           isDataSensitive,
+			},
+			"debug": schema.BoolAttribute{
+				MarkdownDescription: "Whether to emit verbose debug output while working with the API object on the server.",
+				Optional:            true,
+			},
+			"read_search": schema.MapAttribute{
+				MarkdownDescription: "Custom search for `read_path`. This map will take `search_data`, `search_key`, `search_value`, `results_key` and `query_string`.",
+				Optional:            true,
+				ElementType:         types.StringType,
+			},
+			"query_string": schema.StringAttribute{
+				MarkdownDescription: "Query string to be included in the path.",
+				Optional:            true,
+			},
+			"api_data": schema.MapAttribute{
+				MarkdownDescription: "After data from the API server is read, this map will include k/v pairs usable in other terraform resources as readable objects.",
+				Computed:            true,
+				Sensitive:           isDataSensitive,
+				ElementType:         types.StringType,
+			},
+			"api_response": schema.StringAttribute{
+				MarkdownDescription: "The raw body of the HTTP response from the last read of the object.",
+				Computed:            true,
+				Sensitive:           isDataSensitive,
+			},
+			"create_response": schema.StringAttribute{
+				MarkdownDescription: "The raw body of the HTTP response returned when creating the object.",
+				Computed:            true,
+				Sensitive:           isDataSensitive,
+			},
+			"force_new": schema.ListAttribute{
+				MarkdownDescription: "Any changes to these values will result in recreating the resource instead of updating.",
+				Optional:            true,
+				ElementType:         types.StringType,
+			},
+			"read_data": schema.StringAttribute{
+				MarkdownDescription: "Valid JSON object to pass during read requests.",
+				Optional:            true,
+				Sensitive:           isDataSensitive,
+			},
+			"update_data": schema.StringAttribute{
+				MarkdownDescription: "Valid JSON object to pass during update requests.",
+				Optional:            true,
+				Sensitive:           isDataSensitive,
+			},
+			"destroy_data": schema.StringAttribute{
+				MarkdownDescription: "Valid JSON object to pass during destroy requests.",
+				Optional:            true,
+				Sensitive:           isDataSensitive,
+			},
+			"ignore_changes_to": schema.ListAttribute{
+				MarkdownDescription: "A list of fields to which remote changes will be ignored.",
+				Optional:            true,
+				Sensitive:           isDataSensitive,
+				ElementType:         types.StringType,
+			},
+			"ignore_all_server_changes": schema.BoolAttribute{
+				MarkdownDescription: "By default Terraform will attempt to revert changes to remote resources. Set this to 'true' to ignore any remote changes. Default: false",
+				Optional:            true,
+				Computed:            true,
+				Default:             booldefault.StaticBool(false),
+			},
 		},
-
-		Schema: map[string]*schema.Schema{
-			"path": {
-				Type:        schema.TypeString,
-				Description: "The API path on top of the base URL set in the provider that represents objects of this type on the API server.",
-				Required:    true,
-			},
-			"create_path": {
-				Type:        schema.TypeString,
-				Description: "Defaults to `path`. The API path that represents where to CREATE (POST) objects of this type on the API server. The string `{id}` will be replaced with the terraform ID of the object if the data contains the `id_attribute`.",
-				Optional:    true,
-			},
-			"read_path": {
-				Type:        schema.TypeString,
-				Description: "Defaults to `path/{id}`. The API path that represents where to READ (GET) objects of this type on the API server. The string `{id}` will be replaced with the terraform ID of the object.",
-				Optional:    true,
-			},
-			"update_path": {
-				Type:        schema.TypeString,
-				Description: "Defaults to `path/{id}`. The API path that represents where to UPDATE (PUT) objects of this type on the API server. The string `{id}` will be replaced with the terraform ID of the object.",
-				Optional:    true,
-			},
-			"create_method": {
-				Type:        schema.TypeString,
-				Description: "Defaults to `create_method` set on the provider. Allows per-resource override of `create_method` (see `create_method` provider config documentation)",
-				Optional:    true,
-			},
-			"read_method": {
-				Type:        schema.TypeString,
-				Description: "Defaults to `read_method` set on the provider. Allows per-resource override of `read_method` (see `read_method` provider config documentation)",
-				Optional:    true,
-			},
-			"update_method": {
-				Type:        schema.TypeString,
-				Description: "Defaults to `update_method` set on the provider. Allows per-resource override of `update_method` (see `update_method` provider config documentation)",
-				Optional:    true,
-			},
-			"destroy_method": {
-				Type:        schema.TypeString,
-				Description: "Defaults to `destroy_method` set on the provider. Allows per-resource override of `destroy_method` (see `destroy_method` provider config documentation)",
-				Optional:    true,
-			},
-			"destroy_path": {
-				Type:        schema.TypeString,
-				Description: "Defaults to `path/{id}`. The API path that represents where to DESTROY (DELETE) objects of this type on the API server. The string `{id}` will be replaced with the terraform ID of the object.",
-				Optional:    true,
-			},
-			"id_attribute": {
-				Type:        schema.TypeString,
-				Description: "Defaults to `id_attribute` set on the provider. Allows per-resource override of `id_attribute` (see `id_attribute` provider config documentation)",
-				Optional:    true,
-			},
-			"object_id": {
-				Type:        schema.TypeString,
-				Description: "Defaults to the id learned by the provider during normal operations and `id_attribute`. Allows you to set the id manually. This is used in conjunction with the `*_path` attributes.",
-				Optional:    true,
-			},
-			"data": {
-				Type:        schema.TypeString,
-				Description: "Valid JSON object that this provider will manage with the API server.",
-				Required:    true,
-				Sensitive:   isDataSensitive,
-				ValidateFunc: func(val interface{}, key string) (warns []string, errs []error) {
-					v := val.(string)
-					if v != "" {
-						data := make(map[string]interface{})
-						err := json.Unmarshal([]byte(v), &data)
-						if err != nil {
-							errs = append(errs, fmt.Errorf("data attribute is invalid JSON: %v", err))
-						}
-					}
-					return warns, errs
-				},
-			},
-			"debug": {
-				Type:        schema.TypeBool,
-				Description: "Whether to emit verbose debug output while working with the API object on the server.",
-				Optional:    true,
-			},
-			"read_search": {
-				Type:        schema.TypeMap,
-				Description: "Custom search for `read_path`. This map will take `search_data`, `search_key`, `search_value`, `results_key` and `query_string` (see datasource config documentation)",
-				Optional:    true,
-			},
-			"query_string": {
-				Type:        schema.TypeString,
-				Description: "Query string to be included in the path",
-				Optional:    true,
-			},
-			"api_data": {
-				Type: schema.TypeMap,
-				Elem: &schema.Schema{
-					Type: schema.TypeString,
-				},
-				Description: "After data from the API server is read, this map will include k/v pairs usable in other terraform resources as readable objects. Currently the value is the golang fmt package's representation of the value (simple primitives are set as expected, but complex types like arrays and maps contain golang formatting).",
-				Computed:    true,
-				Sensitive:   isDataSensitive,
-			},
-			"api_response": {
-				Type:        schema.TypeString,
-				Description: "The raw body of the HTTP response from the last read of the object.",
-				Computed:    true,
-				Sensitive:   isDataSensitive,
-			},
-			"create_response": {
-				Type:        schema.TypeString,
-				Description: "The raw body of the HTTP response returned when creating the object.",
-				Computed:    true,
-				Sensitive:   isDataSensitive,
-			},
-			"force_new": {
-				Type:        schema.TypeList,
-				Elem:        &schema.Schema{Type: schema.TypeString},
-				Optional:    true,
-				ForceNew:    true,
-				Description: "Any changes to these values will result in recreating the resource instead of updating.",
-			},
-			"read_data": {
-				Type:        schema.TypeString,
-				Optional:    true,
-				Description: "Valid JSON object to pass during read requests.",
-				Sensitive:   isDataSensitive,
-				ValidateFunc: func(val interface{}, key string) (warns []string, errs []error) {
-					v := val.(string)
-					if v != "" {
-						data := make(map[string]interface{})
-						err := json.Unmarshal([]byte(v), &data)
-						if err != nil {
-							errs = append(errs, fmt.Errorf("read_data attribute is invalid JSON: %v", err))
-						}
-					}
-					return warns, errs
-				},
-			},
-			"update_data": {
-				Type:        schema.TypeString,
-				Optional:    true,
-				Description: "Valid JSON object to pass during to update requests.",
-				Sensitive:   isDataSensitive,
-				ValidateFunc: func(val interface{}, key string) (warns []string, errs []error) {
-					v := val.(string)
-					if v != "" {
-						data := make(map[string]interface{})
-						err := json.Unmarshal([]byte(v), &data)
-						if err != nil {
-							errs = append(errs, fmt.Errorf("update_data attribute is invalid JSON: %v", err))
-						}
-					}
-					return warns, errs
-				},
-			},
-			"destroy_data": {
-				Type:        schema.TypeString,
-				Optional:    true,
-				Description: "Valid JSON object to pass during to destroy requests.",
-				Sensitive:   isDataSensitive,
-				ValidateFunc: func(val interface{}, key string) (warns []string, errs []error) {
-					v := val.(string)
-					if v != "" {
-						data := make(map[string]interface{})
-						err := json.Unmarshal([]byte(v), &data)
-						if err != nil {
-							errs = append(errs, fmt.Errorf("destroy_data attribute is invalid JSON: %v", err))
-						}
-					}
-					return warns, errs
-				},
-			},
-			"ignore_changes_to": {
-				Type:        schema.TypeList,
-				Elem:        &schema.Schema{Type: schema.TypeString},
-				Optional:    true,
-				Description: "A list of fields to which remote changes will be ignored. For example, an API might add or remove metadata, such as a 'last_modified' field, which Terraform should not attempt to correct. Syntax options: (1) Use dot notation for nested fields: 'metadata.timestamp', (2) Use '[]' to ignore fields within list items: 'items[].secretField', (3) Keys containing dots (like '@odata.etag') are matched exactly before attempting path descent.",
-				Sensitive:   isDataSensitive,
-				// TODO ValidateFunc not supported for lists, but should probably validate that the ignore paths are valid
-			},
-			"ignore_all_server_changes": {
-				Type:        schema.TypeBool,
-				Description: "By default Terraform will attempt to revert changes to remote resources. Set this to 'true' to ignore any remote changes. Default: false",
-				Optional:    true,
-				Default:     false,
-			},
-		}, /* End schema */
-
 	}
 }
 
-/*
-Since there is nothing in the ResourceData structure other
+func (r *RestAPIObjectResource) Configure(ctx context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
+	// Prevent panic if the provider has not been configured.
+	if req.ProviderData == nil {
+		return
+	}
 
-	than the "id" passed on the command line, we have to use an opinionated
-	view of the API paths to figure out how to read that object
-	from the API
-*/
-func resourceRestAPIImport(d *schema.ResourceData, meta interface{}) (imported []*schema.ResourceData, err error) {
-	input := d.Id()
+	client, ok := req.ProviderData.(*APIClient)
+	if !ok {
+		resp.Diagnostics.AddError(
+			"Unexpected Resource Configure Type",
+			fmt.Sprintf("Expected *APIClient, got: %T. Please report this issue to the provider developers.", req.ProviderData),
+		)
+		return
+	}
+
+	r.client = client
+}
+
+func (r *RestAPIObjectResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
+	var data RestAPIObjectModel
+
+	resp.Diagnostics.Append(req.Plan.Get(ctx, &data)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	opts, err := r.buildAPIObjectOpts(ctx, &data)
+	if err != nil {
+		resp.Diagnostics.AddError("Failed to build API object options", err.Error())
+		return
+	}
+
+	debug := data.Debug.ValueBool()
+	obj, err := NewAPIObject(r.client, opts)
+	if err != nil {
+		resp.Diagnostics.AddError("Failed to create API object", err.Error())
+		return
+	}
+
+	if debug {
+		log.Printf("resource_api_object.go: Create routine called. Object built:\n%s\n", obj.toString())
+	}
+
+	err = obj.createObject()
+	if err != nil {
+		resp.Diagnostics.AddError("Failed to create object via API", err.Error())
+		return
+	}
+
+	// Update state from API response
+	data.ID = types.StringValue(obj.id)
+	r.setResourceState(ctx, obj, &data)
+	data.CreateResponse = types.StringValue(obj.apiResponse)
+
+	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
+}
+
+func (r *RestAPIObjectResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
+	var data RestAPIObjectModel
+
+	resp.Diagnostics.Append(req.State.Get(ctx, &data)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	opts, err := r.buildAPIObjectOpts(ctx, &data)
+	if err != nil {
+		if strings.Contains(err.Error(), "error parsing data provided") {
+			log.Printf("resource_api_object.go: WARNING! The data passed from Terraform's state is invalid! %v", err)
+			log.Printf("resource_api_object.go: Continuing with partially constructed object...")
+		} else {
+			resp.Diagnostics.AddError("Failed to build API object options", err.Error())
+			return
+		}
+	}
+
+	debug := data.Debug.ValueBool()
+	obj, err := NewAPIObject(r.client, opts)
+	if err != nil {
+		resp.Diagnostics.AddError("Failed to create API object", err.Error())
+		return
+	}
+
+	if debug {
+		log.Printf("resource_api_object.go: Read routine called. Object built:\n%s\n", obj.toString())
+	}
+
+	err = obj.readObject()
+	if err != nil {
+		// Object doesn't exist, remove from state
+		resp.State.RemoveResource(ctx)
+		return
+	}
+
+	log.Printf("resource_api_object.go: Read resource. Returned id is '%s'\n", obj.id)
+	data.ID = types.StringValue(obj.id)
+	r.setResourceState(ctx, obj, &data)
+
+	// Check whether the remote resource has changed
+	if !data.IgnoreAllServerChanges.ValueBool() {
+		ignoreList := []string{}
+		if !data.IgnoreChangesTo.IsNull() && !data.IgnoreChangesTo.IsUnknown() {
+			var ignoreItems []types.String
+			data.IgnoreChangesTo.ElementsAs(ctx, &ignoreItems, false)
+			for _, s := range ignoreItems {
+				ignoreList = append(ignoreList, s.ValueString())
+			}
+		}
+
+		modifiedResource, hasDifferences := getDelta(obj.data, obj.apiData, ignoreList)
+		if hasDifferences {
+			log.Printf("resource_api_object.go: Found differences in remote resource\n")
+			encoded, err := json.Marshal(modifiedResource)
+			if err != nil {
+				resp.Diagnostics.AddError("Failed to encode modified resource", err.Error())
+				return
+			}
+			data.Data = types.StringValue(string(encoded))
+		}
+	}
+
+	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
+}
+
+func (r *RestAPIObjectResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
+	var data RestAPIObjectModel
+	var state RestAPIObjectModel
+
+	resp.Diagnostics.Append(req.Plan.Get(ctx, &data)...)
+	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	// Preserve create_response from state
+	data.CreateResponse = state.CreateResponse
+
+	opts, err := r.buildAPIObjectOpts(ctx, &data)
+	if err != nil {
+		resp.Diagnostics.AddError("Failed to build API object options", err.Error())
+		return
+	}
+
+	debug := data.Debug.ValueBool()
+	obj, err := NewAPIObject(r.client, opts)
+	if err != nil {
+		resp.Diagnostics.AddError("Failed to create API object", err.Error())
+		return
+	}
+
+	// If copy_keys is not empty, we have to grab the latest data
+	if len(r.client.copyKeys) > 0 {
+		err = obj.readObject()
+		if err != nil {
+			resp.Diagnostics.AddError("Failed to read object before update", err.Error())
+			return
+		}
+	}
+
+	if debug {
+		log.Printf("resource_api_object.go: Update routine called. Object built:\n%s\n", obj.toString())
+	}
+
+	err = obj.updateObject()
+	if err != nil {
+		resp.Diagnostics.AddError("Failed to update object via API", err.Error())
+		return
+	}
+
+	r.setResourceState(ctx, obj, &data)
+
+	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
+}
+
+func (r *RestAPIObjectResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
+	var data RestAPIObjectModel
+
+	resp.Diagnostics.Append(req.State.Get(ctx, &data)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	opts, err := r.buildAPIObjectOpts(ctx, &data)
+	if err != nil {
+		resp.Diagnostics.AddError("Failed to build API object options", err.Error())
+		return
+	}
+
+	debug := data.Debug.ValueBool()
+	obj, err := NewAPIObject(r.client, opts)
+	if err != nil {
+		resp.Diagnostics.AddError("Failed to create API object", err.Error())
+		return
+	}
+
+	if debug {
+		log.Printf("resource_api_object.go: Delete routine called. Object built:\n%s\n", obj.toString())
+	}
+
+	err = obj.deleteObject()
+	if err != nil {
+		if strings.Contains(err.Error(), "404") {
+			// 404 means it doesn't exist. Call that good enough
+			return
+		}
+		resp.Diagnostics.AddError("Failed to delete object via API", err.Error())
+		return
+	}
+}
+
+func (r *RestAPIObjectResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
+	input := req.ID
 
 	hasTrailingSlash := strings.HasSuffix(input, "/")
 	var n int
@@ -233,11 +387,14 @@ func resourceRestAPIImport(d *schema.ResourceData, meta interface{}) (imported [
 	}
 
 	if n == -1 {
-		return imported, fmt.Errorf("invalid path to import api_object '%s' - must be /<full path from server root>/<object id>", input)
+		resp.Diagnostics.AddError(
+			"Invalid Import Path",
+			fmt.Sprintf("Invalid path to import api_object '%s' - must be /<full path from server root>/<object id>", input),
+		)
+		return
 	}
 
-	path := input[0:n]
-	d.Set("path", path)
+	apiPath := input[0:n]
 
 	var id string
 	if hasTrailingSlash {
@@ -246,275 +403,90 @@ func resourceRestAPIImport(d *schema.ResourceData, meta interface{}) (imported [
 		id = input[n+1:]
 	}
 
-	d.Set("data", fmt.Sprintf(`{ "id": "%s" }`, id))
-	d.SetId(id)
-
-	/* Troubleshooting is hard enough. Emit log messages so TF_LOG
-	   has useful information in case an import isn't working */
-	d.Set("debug", true)
-
-	obj, err := makeAPIObject(d, meta)
-	if err != nil {
-		return imported, err
-	}
-	if obj.debug {
-		log.Printf("resource_api_object.go: Import routine called. Object built:\n%s\n", obj.toString())
-	}
-
-	err = obj.readObject()
-	if err == nil {
-		setResourceState(obj, d)
-		/* Data that we set in the state above must be passed along
-		   as an item in the stack of imported data */
-		imported = append(imported, d)
-	}
-
-	return imported, err
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, fwpath.Root("id"), id)...)
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, fwpath.Root("path"), apiPath)...)
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, fwpath.Root("data"), fmt.Sprintf(`{ "id": "%s" }`, id))...)
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, fwpath.Root("debug"), true)...)
 }
 
-func resourceRestAPICreate(d *schema.ResourceData, meta interface{}) error {
-	obj, err := makeAPIObject(d, meta)
-	if err != nil {
-		return err
-	}
-	if obj.debug {
-		log.Printf("resource_api_object.go: Create routine called. Object built:\n%s\n", obj.toString())
-	}
-
-	err = obj.createObject()
-	if err == nil {
-		/* Setting terraform ID tells terraform the object was created or it exists */
-		d.SetId(obj.id)
-		setResourceState(obj, d)
-		/* Only set during create for APIs that don't return sensitive data on subsequent retrieval */
-		d.Set("create_response", obj.apiResponse)
-	}
-	return err
-}
-
-func resourceRestAPIRead(d *schema.ResourceData, meta interface{}) error {
-	obj, err := makeAPIObject(d, meta)
-	if err != nil {
-		if strings.Contains(err.Error(), "error parsing data provided") {
-			log.Printf("resource_api_object.go: WARNING! The data passed from Terraform's state is invalid! %v", err)
-			log.Printf("resource_api_object.go: Continuing with partially constructed object...")
-		} else {
-			return err
-		}
-	}
-
-	if obj.debug {
-		log.Printf("resource_api_object.go: Read routine called. Object built:\n%s\n", obj.toString())
-	}
-
-	err = obj.readObject()
-	if err == nil {
-		/* Setting terraform ID tells terraform the object was created or it exists */
-		log.Printf("resource_api_object.go: Read resource. Returned id is '%s'\n", obj.id)
-		d.SetId(obj.id)
-
-		setResourceState(obj, d)
-
-		// Check whether the remote resource has changed.
-		if !(d.Get("ignore_all_server_changes")).(bool) {
-			ignoreList := []string{}
-			v, ok := d.GetOk("ignore_changes_to")
-			if ok {
-				for _, s := range v.([]interface{}) {
-					ignoreList = append(ignoreList, s.(string))
-				}
-			}
-
-			// This checks if there were any changes to the remote resource that will need to be corrected
-			// by comparing the current state with the response returned by the api.
-			modifiedResource, hasDifferences := getDelta(obj.data, obj.apiData, ignoreList)
-
-			if hasDifferences {
-				log.Printf("resource_api_object.go: Found differences in remote resource\n")
-				encoded, err := json.Marshal(modifiedResource)
-				if err != nil {
-					return err
-				}
-				jsonString := string(encoded)
-				d.Set("data", jsonString)
-			}
-		}
-
-	}
-	return err
-}
-
-func resourceRestAPIUpdate(d *schema.ResourceData, meta interface{}) error {
-	obj, err := makeAPIObject(d, meta)
-	if err != nil {
-		d.Partial(true)
-		return err
-	}
-
-	/* If copy_keys is not empty, we have to grab the latest
-	   data so we can copy anything needed before the update */
-	client := meta.(*APIClient)
-	if len(client.copyKeys) > 0 {
-		err = obj.readObject()
-		if err != nil {
-			return err
-		}
-	}
-
-	if obj.debug {
-		log.Printf("resource_api_object.go: Update routine called. Object built:\n%s\n", obj.toString())
-	}
-
-	err = obj.updateObject()
-	if err == nil {
-		setResourceState(obj, d)
-	} else {
-		d.Partial(true)
-	}
-	return err
-}
-
-func resourceRestAPIDelete(d *schema.ResourceData, meta interface{}) error {
-	obj, err := makeAPIObject(d, meta)
-	if err != nil {
-		return err
-	}
-	if obj.debug {
-		log.Printf("resource_api_object.go: Delete routine called. Object built:\n%s\n", obj.toString())
-	}
-
-	err = obj.deleteObject()
-	if err != nil {
-		if strings.Contains(err.Error(), "404") {
-			/* 404 means it doesn't exist. Call that good enough */
-			err = nil
-		}
-	}
-	return err
-}
-
-func resourceRestAPIExists(d *schema.ResourceData, meta interface{}) (exists bool, err error) {
-	obj, err := makeAPIObject(d, meta)
-	if err != nil {
-		if strings.Contains(err.Error(), "error parsing data provided") {
-			log.Printf("resource_api_object.go: WARNING! The data passed from Terraform's state is invalid! %v", err)
-			log.Printf("resource_api_object.go: Continuing with partially constructed object...")
-		} else {
-			return exists, err
-		}
-	}
-
-	if obj.debug {
-		log.Printf("resource_api_object.go: Exists routine called. Object built: %s\n", obj.toString())
-	}
-
-	/* Assume all errors indicate the object just doesn't exist.
-	This may not be a good assumption... */
-	err = obj.readObject()
-	if err == nil {
-		exists = true
-	}
-	return exists, err
-}
-
-/*
-Simple helper routine to build an api_object struct
-
-	for the various calls terraform will use. Unfortunately,
-	terraform cannot just reuse objects, so each CRUD operation
-	results in a new object created
-*/
-func makeAPIObject(d *schema.ResourceData, meta interface{}) (*APIObject, error) {
-	opts, err := buildAPIObjectOpts(d)
-	if err != nil {
-		return nil, err
-	}
-
-	caller := "unknown"
-	pc, _, _, ok := runtime.Caller(1)
-	details := runtime.FuncForPC(pc)
-	if ok && details != nil {
-		parts := strings.Split(details.Name(), ".")
-		caller = parts[len(parts)-1]
-	}
-	log.Printf("resource_rest_api.go: Constructing new APIObject in makeAPIObject (called by %s)", caller)
-
-	obj, err := NewAPIObject(meta.(*APIClient), opts)
-
-	return obj, err
-}
-
-func buildAPIObjectOpts(d *schema.ResourceData) (*apiObjectOpts, error) {
+// Helper function to build API object options from model
+func (r *RestAPIObjectResource) buildAPIObjectOpts(ctx context.Context, data *RestAPIObjectModel) (*apiObjectOpts, error) {
 	opts := &apiObjectOpts{
-		path: d.Get("path").(string),
+		path: data.Path.ValueString(),
 	}
 
-	/* Allow user to override provider-level id_attribute */
-	if v, ok := d.GetOk("id_attribute"); ok {
-		opts.idAttribute = v.(string)
+	if !data.IDAttribute.IsNull() && !data.IDAttribute.IsUnknown() {
+		opts.idAttribute = data.IDAttribute.ValueString()
 	}
 
-	/* Allow user to specify the ID manually */
-	if v, ok := d.GetOk("object_id"); ok {
-		opts.id = v.(string)
+	if !data.ObjectID.IsNull() && !data.ObjectID.IsUnknown() {
+		opts.id = data.ObjectID.ValueString()
 	} else {
-		/* If not specified, see if terraform has an ID */
-		opts.id = d.Id()
+		opts.id = data.ID.ValueString()
 	}
 
 	log.Printf("resource_rest_api.go: buildAPIObjectOpts routine called for id '%s'\n", opts.id)
 
-	if v, ok := d.GetOk("create_path"); ok {
-		opts.postPath = v.(string)
+	if !data.CreatePath.IsNull() && !data.CreatePath.IsUnknown() {
+		opts.postPath = data.CreatePath.ValueString()
 	}
-	if v, ok := d.GetOk("read_path"); ok {
-		opts.getPath = v.(string)
+	if !data.ReadPath.IsNull() && !data.ReadPath.IsUnknown() {
+		opts.getPath = data.ReadPath.ValueString()
 	}
-	if v, ok := d.GetOk("update_path"); ok {
-		opts.putPath = v.(string)
+	if !data.UpdatePath.IsNull() && !data.UpdatePath.IsUnknown() {
+		opts.putPath = data.UpdatePath.ValueString()
 	}
-	if v, ok := d.GetOk("create_method"); ok {
-		opts.createMethod = v.(string)
+	if !data.CreateMethod.IsNull() && !data.CreateMethod.IsUnknown() {
+		opts.createMethod = data.CreateMethod.ValueString()
 	}
-	if v, ok := d.GetOk("read_method"); ok {
-		opts.readMethod = v.(string)
+	if !data.ReadMethod.IsNull() && !data.ReadMethod.IsUnknown() {
+		opts.readMethod = data.ReadMethod.ValueString()
 	}
-	if v, ok := d.GetOk("read_data"); ok {
-		opts.readData = v.(string)
+	if !data.ReadData.IsNull() && !data.ReadData.IsUnknown() {
+		opts.readData = data.ReadData.ValueString()
 	}
-	if v, ok := d.GetOk("update_method"); ok {
-		opts.updateMethod = v.(string)
+	if !data.UpdateMethod.IsNull() && !data.UpdateMethod.IsUnknown() {
+		opts.updateMethod = data.UpdateMethod.ValueString()
 	}
-	if v, ok := d.GetOk("update_data"); ok {
-		opts.updateData = v.(string)
+	if !data.UpdateData.IsNull() && !data.UpdateData.IsUnknown() {
+		opts.updateData = data.UpdateData.ValueString()
 	}
-	if v, ok := d.GetOk("destroy_method"); ok {
-		opts.destroyMethod = v.(string)
+	if !data.DestroyMethod.IsNull() && !data.DestroyMethod.IsUnknown() {
+		opts.destroyMethod = data.DestroyMethod.ValueString()
 	}
-	if v, ok := d.GetOk("destroy_data"); ok {
-		opts.destroyData = v.(string)
+	if !data.DestroyData.IsNull() && !data.DestroyData.IsUnknown() {
+		opts.destroyData = data.DestroyData.ValueString()
 	}
-	if v, ok := d.GetOk("destroy_path"); ok {
-		opts.deletePath = v.(string)
+	if !data.DestroyPath.IsNull() && !data.DestroyPath.IsUnknown() {
+		opts.deletePath = data.DestroyPath.ValueString()
 	}
-	if v, ok := d.GetOk("query_string"); ok {
-		opts.queryString = v.(string)
+	if !data.QueryString.IsNull() && !data.QueryString.IsUnknown() {
+		opts.queryString = data.QueryString.ValueString()
 	}
 
-	readSearch := expandReadSearch(d.Get("read_search").(map[string]interface{}))
-	opts.readSearch = readSearch
+	// Handle read_search map
+	if !data.ReadSearch.IsNull() && !data.ReadSearch.IsUnknown() {
+		var readSearchMap map[string]types.String
+		data.ReadSearch.ElementsAs(ctx, &readSearchMap, false)
+		readSearch := make(map[string]string)
+		for k, v := range readSearchMap {
+			readSearch[k] = v.ValueString()
+		}
+		opts.readSearch = readSearch
+	}
 
-	opts.data = d.Get("data").(string)
-	opts.debug = d.Get("debug").(bool)
+	opts.data = data.Data.ValueString()
+	opts.debug = data.Debug.ValueBool()
 
 	return opts, nil
 }
 
-func expandReadSearch(v map[string]interface{}) (readSearch map[string]string) {
-	readSearch = make(map[string]string)
-	for key, val := range v {
-		readSearch[key] = val.(string)
+// Helper function to set resource state from API object
+func (r *RestAPIObjectResource) setResourceState(ctx context.Context, obj *APIObject, data *RestAPIObjectModel) {
+	apiData := make(map[string]attr.Value)
+	for k, v := range obj.apiData {
+		apiData[k] = types.StringValue(fmt.Sprintf("%v", v))
 	}
-
-	return
+	data.APIData, _ = types.MapValue(types.StringType, apiData)
+	data.APIResponse = types.StringValue(obj.apiResponse)
 }
