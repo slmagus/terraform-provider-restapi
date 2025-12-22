@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -141,6 +142,33 @@ func TestAPIClient(t *testing.T) {
 	}
 	if res != "It works!" {
 		t.Fatalf("client_test.go: Got back '%s' but expected 'It works!'\n", res)
+	}
+}
+
+// TestAPIClientInvalidMethod tests that sendRequest handles invalid HTTP methods gracefully
+// instead of crashing the process. Before the fix, this would have triggered log.Fatal().
+func TestAPIClientInvalidMethod(t *testing.T) {
+	opt := &apiClientOpt{
+		uri:       "http://127.0.0.1:8083/",
+		timeout:   2,
+		rateLimit: 1,
+	}
+	client, err := NewAPIClient(opt)
+	if err != nil {
+		t.Fatalf("Failed to create API client: %s", err)
+	}
+
+	// An HTTP method containing a space is invalid and causes http.NewRequest to fail.
+	// Before the fix, this would have called log.Fatal() and crashed the process.
+	// Now it should return an error gracefully.
+	_, err = client.sendRequest("INVALID METHOD", "/test", "")
+	if err == nil {
+		t.Fatal("Expected error for invalid HTTP method, but got nil")
+	}
+
+	// Verify the error message is meaningful
+	if !strings.Contains(err.Error(), "invalid method") {
+		t.Logf("Got error: %s", err.Error())
 	}
 }
 

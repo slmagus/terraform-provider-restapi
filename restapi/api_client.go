@@ -270,7 +270,6 @@ func (client *APIClient) sendRequest(method string, path string, data string) (s
 	}
 
 	if err != nil {
-		log.Fatal(err)
 		return "", err
 	}
 
